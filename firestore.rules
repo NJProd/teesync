@@ -1,0 +1,221 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ── Helper Functions ──────────────────────────────────────────────────
+
+    // Check if user is authenticated
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    // Get the user's tenant mapping
+    function getUserTenant() {
+      return get(/databases/$(database)/documents/userTenantMap/$(request.auth.uid)).data;
+    }
+
+    // Check if user belongs to a specific tenant
+    function belongsToTenant(tenantId) {
+      return isAuthenticated() && getUserTenant().tenantId == tenantId;
+    }
+
+    // Check if user has a specific role for their tenant
+    function hasRole(tenantId, role) {
+      let mapping = getUserTenant();
+      return mapping.tenantId == tenantId &&
+        get(/databases/$(database)/documents/tenants/$(tenantId)/employees/$(mapping.employeeId)).data.role == role;
+    }
+
+    // Check if user is owner or manager
+    function isManagerOrAbove(tenantId) {
+      let mapping = getUserTenant();
+      let emp = get(/databases/$(database)/documents/tenants/$(tenantId)/employees/$(mapping.employeeId)).data;
+      return mapping.tenantId == tenantId && (emp.role == 'owner' || emp.role == 'manager');
+    }
+
+    // Check if user is any staff member of tenant
+    function isStaff(tenantId) {
+      return belongsToTenant(tenantId);
+    }
+
+    // Check if user is platform admin
+    function isPlatformAdmin() {
+      return isAuthenticated() &&
+        exists(/databases/$(database)/documents/platformAdmins/$(request.auth.uid));
+    }
+
+    // ── Tenant Slug Lookup ────────────────────────────────────────────────
+
+    match /tenantSlugs/{slug} {
+      allow read: if true; // Public — needed for slug resolution
+      allow write: if isPlatformAdmin();
+    }
+
+    // ── User → Tenant Mapping ─────────────────────────────────────────────
+
+    match /userTenantMap/{userId} {
+      allow read: if isAuthenticated() && request.auth.uid == userId;
+      allow write: if isPlatformAdmin();
+    }
+
+    // ── Tenant Documents ──────────────────────────────────────────────────
+
+    match /tenants/{tenantId} {
+      // Tenant profile: public read (for booking page branding), staff write
+      allow read: if true;
+      allow update: if isManagerOrAbove(tenantId);
+      allow create, delete: if isPlatformAdmin();
+
+      // ── Bays ──────────────────────────────────────────────────────────
+
+      match /bays/{bayId} {
+        allow read: if true; // Public needs bay info for booking
+        allow write: if isManagerOrAbove(tenantId);
+      }
+
+      // ── Bookings ──────────────────────────────────────────────────────
+
+      match /bookings/{bookingId} {
+        // Public can read their own booking (by ID from confirmation)
+        // Staff can read all bookings for their tenant
+        allow read: if true; // Booking confirmation pages need this
+        allow create: if true; // Online booking creates these
+        allow update: if isStaff(tenantId);
+        allow delete: if isManagerOrAbove(tenantId);
+      }
+
+      // ── Tabs ──────────────────────────────────────────────────────────
+
+      match /tabs/{tabId} {
+        allow read: if isStaff(tenantId);
+        allow create, update: if isStaff(tenantId);
+        allow delete: if isManagerOrAbove(tenantId);
+      }
+
+      // ── Orders ────────────────────────────────────────────────────────
+
+      match /orders/{orderId} {
+        allow read: if isStaff(tenantId);
+        allow create, update: if isStaff(tenantId);
+        allow delete: if isManagerOrAbove(tenantId);
+      }
+
+      // ── Transactions ──────────────────────────────────────────────────
+
+      match /transactions/{txId} {
+        allow read: if isStaff(tenantId);
+        allow create: if isStaff(tenantId);
+        allow update: if isManagerOrAbove(tenantId); // only managers can void/refund
+        allow delete: if false; // never delete transactions
+      }
+
+      // ── Customers ─────────────────────────────────────────────────────
+
+      match /customers/{customerId} {
+        allow read: if isStaff(tenantId);
+        allow create, update: if isStaff(tenantId);
+        allow delete: if isManagerOrAbove(tenantId);
+      }
+
+      // ── Menu ──────────────────────────────────────────────────────────
+
+      match /menu/{itemId} {
+        allow read: if true; // Public for QR ordering / online menu
+        allow write: if isManagerOrAbove(tenantId);
+      }
+
+      match /categories/{catId} {
+        allow read: if true;
+        allow write: if isManagerOrAbove(tenantId);
+      }
+
+      // ── Employees ─────────────────────────────────────────────────────
+
+      match /employees/{empId} {
+        allow read: if isStaff(tenantId);
+        allow write: if isManagerOrAbove(tenantId);
+      }
+
+      // ── Shifts ────────────────────────────────────────────────────────
+
+      match /shifts/{shiftId} {
+        allow read: if isStaff(tenantId);
+        allow create, update: if isStaff(tenantId);
+        allow delete: if false;
+      }
+
+      // ── Memberships ───────────────────────────────────────────────────
+
+      match /membershipTiers/{tierId} {
+        allow read: if true; // Public for membership signup
+        allow write: if isManagerOrAbove(tenantId);
+      }
+
+      match /memberships/{membershipId} {
+        allow read: if isStaff(tenantId);
+        allow write: if isManagerOrAbove(tenantId);
+      }
+
+      // ── Gift Cards ────────────────────────────────────────────────────
+
+      match /giftCards/{cardId} {
+        allow read: if isStaff(tenantId);
+        allow create: if isStaff(tenantId);
+        allow update: if isStaff(tenantId);
+        allow delete: if false; // never delete gift cards
+      }
+
+      // ── Inventory ─────────────────────────────────────────────────────
+
+      match /inventory/{itemId} {
+        allow read: if isStaff(tenantId);
+        allow write: if isManagerOrAbove(tenantId);
+      }
+
+      // ── Leagues ───────────────────────────────────────────────────────
+
+      match /leagues/{leagueId} {
+        allow read: if true;
+        allow write: if isManagerOrAbove(tenantId);
+      }
+
+      // ── Events ────────────────────────────────────────────────────────
+
+      match /events/{eventId} {
+        allow read: if true;
+        allow write: if isManagerOrAbove(tenantId);
+      }
+
+      // ── Audit Log ─────────────────────────────────────────────────────
+
+      match /auditLog/{logId} {
+        allow read: if isManagerOrAbove(tenantId);
+        allow create: if isStaff(tenantId);
+        allow update, delete: if false; // audit logs are immutable
+      }
+
+      // ── Settings ──────────────────────────────────────────────────────
+
+      match /settings/{settingId} {
+        allow read: if isStaff(tenantId);
+        allow write: if isManagerOrAbove(tenantId);
+      }
+    }
+
+    // ── Platform Admin ────────────────────────────────────────────────────
+
+    match /platformAdmins/{adminId} {
+      allow read: if isAuthenticated() && request.auth.uid == adminId;
+      allow write: if false; // manually managed
+    }
+
+    match /platform/{document=**} {
+      allow read, write: if isPlatformAdmin();
+    }
+
+    // ── Deny everything else ──────────────────────────────────────────────
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
